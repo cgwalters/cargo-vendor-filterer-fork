@@ -505,25 +505,12 @@ fn new_metadata_cmd_with_config(args: &Args, config: &VendorFilter) -> MetadataC
     command
 }
 
-fn get_unfiltered_packages(
-    args: &Args,
-    config: &VendorFilter,
-) -> Result<HashMap<cargo_metadata::PackageId, cargo_metadata::Package>> {
-    let command = new_metadata_cmd_with_config(args, config);
-    let meta = command.exec().context("Executing cargo metadata")?;
-    Ok(meta
-        .packages
-        .into_iter()
-        .map(|pkg| (pkg.id.clone(), pkg))
-        .collect())
-}
-
 /// Using the filter configuration, add references to the `packages` map that
 /// point into the `all_packages` set we already have (to avoid duplicating memory).
 fn add_packages_for_platform<'p>(
     args: &Args,
     config: &VendorFilter,
-    all_packages: &'p HashMap<cargo_metadata::PackageId, cargo_metadata::Package>,
+    state: &'p State,
     packages: &mut HashMap<cargo_metadata::PackageId, &'p cargo_metadata::Package>,
     platform: Option<&str>,
 ) -> Result<()> {
@@ -534,10 +521,7 @@ fn add_packages_for_platform<'p>(
     }
     let meta = command.exec().context("Executing cargo metadata")?;
     for package in meta.packages {
-        let package = all_packages
-            .get(&package.id)
-            .ok_or_else(|| anyhow!("Failed to find package {}", package.name))
-            .unwrap();
+        let package = state.lookup_package(&package.id);
         packages.insert(package.id.clone(), package);
     }
     Ok(())
@@ -657,6 +641,33 @@ fn package_versioned_filename(p: &Package) -> String {
     format!("{}-{}", p.name, p.version)
 }
 
+/// This holds the global metadata.
+struct State {
+    meta: cargo_metadata::Metadata,
+    all_packages: HashMap<cargo_metadata::PackageId, &cargo_metadata::Package>,
+}
+
+impl State {
+    fn new(args: &Args, config: &VendorFilter) -> Result<Self> {
+        let command = new_metadata_cmd_with_config(args, config);
+        let meta = command.exec().context("Executing cargo metadata")?;
+        let all_packages = meta
+            .packages
+            .into_iter()
+            .map(|pkg| (pkg.id.clone(), pkg))
+            .collect();
+        let root = meta.root_package().map()
+        Ok(Self { all_packages, root })
+    }
+
+    fn lookup_package(&self, pkgid: &cargo_metadata::PackageId) -> &cargo_metadata::Package {
+        self.all_packages
+            .get(&pkgid)
+            .ok_or_else(|| anyhow!("Failed to find package {pkgid:?}"))
+            .unwrap()
+    }
+}
+
 /// An inner version of `main`; the primary code.
 fn run() -> Result<()> {
     let mut args = std::env::args().collect::<Vec<_>>();
@@ -722,8 +733,7 @@ fn run() -> Result<()> {
     eprintln!("Gathering metadata");
     // We need to gather the full, unfiltered metadata to canonically know what
     // `cargo vendor` will do.
-    let all_packages = get_unfiltered_packages(&args, &config)?;
-    let root = get_root_package(&args)?;
+    let state = State::new(&args, &config)?;
 
     // Create a mapping of name -> [package versions]
     let mut pkgs_by_name = BTreeMap::<_, Vec<_>>::new();
